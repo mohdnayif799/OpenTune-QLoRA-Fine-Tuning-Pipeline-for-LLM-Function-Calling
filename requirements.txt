@@ -1,0 +1,42 @@
+# OpenTune runtime dependencies
+#   pip install -r requirements.txt
+#
+# Version floors match the set the project was developed and verified against.
+# Test-only dependencies are not listed here; see tests/requirements.txt.
+
+# PyTorch. PyPI serves CPU wheels by default, which are enough for the
+# config, data-pipeline, and metric layers. Training, evaluation, and GPU
+# inference need a CUDA build - install it from the PyTorch index first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1
+
+# Core fine-tuning stack
+transformers>=4.40
+peft>=0.10
+trl>=0.9
+accelerate>=0.30
+datasets>=2.19
+
+# 4-bit NF4 quantization backend for QLoRA. This is the only quantization
+# backend OpenTune uses; on Colab, uninstall the preinstalled torchao, which
+# fails current peft's internal capability check.
+bitsandbytes>=0.43
+
+# Tokenizer support for the sentencepiece-based vocabularies in the registry
+# (Phi-3, Llama 3, Gemma 2)
+sentencepiece
+protobuf
+
+# Hub authentication and gated model/dataset access
+huggingface_hub>=0.23
+
+# Typed run configuration and validation
+pydantic>=2.0
+
+# Evaluation metrics. The nltk ceiling is carried over from the verified
+# Colab environment, where rouge_score requires it.
+rouge_score
+nltk<3.10
+
+# Streamlit interface (app.py)
+streamlit>=1.35
