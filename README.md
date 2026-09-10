@@ -422,11 +422,12 @@ Released under the MIT License. See [LICENSE](LICENSE) for the full text.
 
 ## Author
 
-**Nayifuddin Muhammed**<br>
-B.E. Computer Science and Engineering (AI & ML)<br>
+**Nayifuddin Muhammed**  
+B.E. Computer Science and Engineering (AI & ML)  
 Neil Gogte Institute of Technology, Hyderabad
 
-- GitHub: _add your profile link_
-- LinkedIn: _add your profile link_
+- GitHub: [mohdnayif799](https://github.com/mohdnayif799)
+- LinkedIn: [muhammed-nayifuddin](https://linkedin.com/in/muhammed-nayifuddin)
+- Email: [mohdnayif799@gmail.com](mailto:mohdnayif799@gmail.com)
 
 Part of an applied ML portfolio focused on making small open-weight models reliable at structured, production-shaped tasks.
