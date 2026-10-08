@@ -14,6 +14,7 @@ Colab tunnel or a rented GPU box) - see design doc Section 25.
 from __future__ import annotations
 
 import html
+import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -184,7 +185,9 @@ with tab_train:
         if not setup.get("uploaded_file"):
             st.error("Upload a dataset in the Setup tab first.")
         else:
-            dataset_path = Path("/tmp") / setup["uploaded_file"].name
+            # "/tmp" is not a temp folder on Windows, and the client controls
+            # the file name, so keep only its last path component.
+            dataset_path = Path(tempfile.gettempdir()) / Path(setup["uploaded_file"].name).name
             dataset_path.write_bytes(setup["uploaded_file"].getvalue())
 
             lora_kwargs = {"preset": LoRAPreset(preset_choice)}

@@ -178,6 +178,51 @@ def test_chat_submit_appends_one_turn_each_and_renders_answer():
     print("PASS: submitting a question adds one user and one assistant turn and renders both")
 
 
+def _start_fine_tuning_with_fake_training(upload_name: str, learning_rate: float | None = None):
+    """
+    Drive the Train tab up to run_training without a GPU: the upload goes
+    through the real file_uploader widget, and train.run_training is patched
+    (app.py imports it by name on every script run) to record the RunConfig
+    it was handed instead of training.
+    """
+    from train import TrainingResult
+
+    received = []
+
+    def fake_run_training(run_config, checkpoints_dir, logs_dir):
+        received.append(run_config)
+        return TrainingResult(
+            run_name=run_config.run_name, adapter_path="fake", final_train_loss=0.5,
+            final_eval_loss=None, num_steps_completed=1, stopped_early=False,
+        )
+
+    at = _new_app_test()
+    with patch("train.run_training", side_effect=fake_run_training):
+        at.run()
+        at.file_uploader[0].set_value(
+            (upload_name, b'{"instruction": "q", "output": "a"}\n', "application/json")
+        ).run()
+        if learning_rate is not None:
+            [n for n in at.number_input if n.label == "Learning rate"][0].set_value(learning_rate).run()
+        [b for b in at.button if b.label == "Start Fine-Tuning"][0].click().run()
+    return at, received
+
+
+def test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name():
+    import tempfile
+
+    at, received = _start_fine_tuning_with_fake_training("nested/dir/upload_probe.jsonl")
+    assert not at.exception, f"Start Fine-Tuning raised: {at.exception}"
+    assert len(received) == 1
+    written = received[0].dataset.file_path
+    try:
+        assert written.parent == Path(tempfile.gettempdir())
+        assert written.name == "upload_probe.jsonl"
+    finally:
+        written.unlink(missing_ok=True)
+    print("PASS: upload is saved under tempfile.gettempdir() using only the file's base name")
+
+
 if __name__ == "__main__":
     test_app_runs_without_error()
     test_model_dropdown_lists_all_registered_models()
@@ -191,4 +236,5 @@ if __name__ == "__main__":
     test_chat_user_bubble_escapes_html_and_keeps_markdown_literal()
     test_chat_assistant_turn_renders_as_plain_markdown()
     test_chat_submit_appends_one_turn_each_and_renders_answer()
+    test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name()
     print("\nAll app.py structural tests passed (UI wiring - NOT the GPU-bound flows).")
