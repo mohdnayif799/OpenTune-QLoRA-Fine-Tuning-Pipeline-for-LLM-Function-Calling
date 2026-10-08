@@ -247,6 +247,53 @@ def test_gated_warning_names_the_login_paths_that_exist():
     print("PASS: gated warning points at Hugging Face login or HF_TOKEN, since the app has no token field")
 
 
+def test_run_evaluation_uses_held_out_rows_and_greedy_decoding():
+    """
+    Only the wiring is checked: weights are never loaded (from_pretrained is
+    patched) and generate_response is patched to record how it was called.
+    """
+    import json
+    import tempfile
+
+    from config import DatasetConfig, RunConfig
+    from data_pipeline import held_out_examples
+    from train import TrainingResult
+
+    dataset = Path(tempfile.mkdtemp()) / "eval.jsonl"
+    dataset.write_text(
+        "\n".join(json.dumps({"instruction": f"q{i}", "output": f"a{i}"}) for i in range(20)),
+        encoding="utf-8",
+    )
+    run_config = RunConfig(
+        run_name="eval-wiring", base_model_id="phi-3-mini",
+        dataset=DatasetConfig(file_path=dataset, validation_split=0.2),
+    )
+    calls = []
+
+    def fake_generate(loaded, instruction, max_new_tokens=256, temperature=0.7):
+        calls.append((instruction, max_new_tokens, temperature))
+        return "out"
+
+    at = _new_app_test()
+    at.session_state["run_config"] = run_config
+    at.session_state["training_result"] = TrainingResult(
+        run_name="eval-wiring", adapter_path="fake", final_train_loss=0.5,
+        final_eval_loss=None, num_steps_completed=1, stopped_early=False,
+    )
+    at.session_state["loaded_chat_model"] = object()
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=object()), \
+            patch("transformers.AutoModelForCausalLM.from_pretrained", return_value=object()), \
+            patch("inference.generate_response", side_effect=fake_generate):
+        at.run()
+        [b for b in at.button if b.label == "Run Evaluation"][0].click().run()
+
+    assert not at.exception, f"Run Evaluation raised: {at.exception}"
+    expected = [ex["prompt"] for ex in held_out_examples(run_config.dataset, 3)]
+    assert [c[0] for c in calls] == [p for p in expected for _ in (0, 1)]  # base then fine-tuned
+    assert all(c[1] == 150 and c[2] == 0 for c in calls), calls
+    print("PASS: Evaluate tab scores 3 held-out rows with greedy decoding and 150 new tokens")
+
+
 if __name__ == "__main__":
     test_app_runs_without_error()
     test_model_dropdown_lists_all_registered_models()
@@ -263,4 +310,5 @@ if __name__ == "__main__":
     test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name()
     test_invalid_run_config_shows_an_error_instead_of_a_traceback()
     test_gated_warning_names_the_login_paths_that_exist()
+    test_run_evaluation_uses_held_out_rows_and_greedy_decoding()
     print("\nAll app.py structural tests passed (UI wiring - NOT the GPU-bound flows).")

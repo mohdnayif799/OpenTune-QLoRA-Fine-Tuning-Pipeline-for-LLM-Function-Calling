@@ -192,6 +192,20 @@ def split_train_val(
     return shuffled[val_size:], shuffled[:val_size]
 
 
+def held_out_examples(config: DatasetConfig, n: int) -> list[Example]:
+    """
+    The first n examples of the validation slice that build_dataset holds out.
+
+    Same split_train_val call and default seed as build_dataset, so these
+    rows were never trained on. The first n raw rows are not a substitute:
+    the split shuffles before holding a slice out, so they are mostly
+    training rows. scripts/colab_reevaluate_existing_adapter.py rebuilds its
+    evaluation set the same way.
+    """
+    _, val_raw = split_train_val(load_raw_examples(config), config.validation_split)
+    return val_raw[:n]
+
+
 def build_dataset(
     config: DatasetConfig, tokenizer: TokenizerProtocol
 ) -> tuple[list[TokenizedExample], list[TokenizedExample]]:

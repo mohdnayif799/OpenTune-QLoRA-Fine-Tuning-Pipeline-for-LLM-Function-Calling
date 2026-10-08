@@ -21,7 +21,7 @@ import streamlit as st
 
 from config import DatasetConfig, LoRAConfig, LoRAPreset, RunConfig, TrainingConfig
 from model_registry import MODEL_REGISTRY, get_model
-from data_pipeline import load_raw_examples
+from data_pipeline import held_out_examples
 from evaluate import evaluate_models
 from inference import LoadedModel, generate_response, load_finetuned_model
 from train import run_training
@@ -275,17 +275,20 @@ with tab_eval:
                 )
                 base_wrapped = LoadedModel(model=base_model_only, tokenizer=base_tokenizer, adapter_path="none")
 
-                # Real held-out examples from the dataset actually uploaded in
-                # the Setup tab, not generic placeholder prompts.
-                raw_examples = load_raw_examples(run_config.dataset)
-                sample = raw_examples[: min(3, len(raw_examples))]
+                # The first rows of the validation slice that training held out
+                # (same split and seed as build_dataset), so neither model was
+                # trained on them.
+                sample = held_out_examples(run_config.dataset, 3)
                 eval_examples = [
                     {"instruction": ex["prompt"], "reference": ex["response"]} for ex in sample
                 ]
 
+                # Greedy decoding with room for a full JSON call, as in
+                # scripts/colab_reevaluate_existing_adapter.py: sampling made two
+                # runs disagree, and 60 tokens could cut a function call short.
                 def generate_fn(instruction: str):
-                    base_out = generate_response(base_wrapped, instruction, max_new_tokens=60)
-                    finetuned_out = generate_response(finetuned_loaded, instruction, max_new_tokens=60)
+                    base_out = generate_response(base_wrapped, instruction, max_new_tokens=150, temperature=0)
+                    finetuned_out = generate_response(finetuned_loaded, instruction, max_new_tokens=150, temperature=0)
                     return base_out, finetuned_out
 
                 st.session_state["comparison_report"] = evaluate_models(

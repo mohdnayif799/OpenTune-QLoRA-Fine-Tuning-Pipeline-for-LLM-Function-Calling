@@ -23,6 +23,7 @@ from config import DatasetConfig
 from data_pipeline import (
     build_dataset,
     format_example,
+    held_out_examples,
     load_raw_examples,
     split_train_val,
 )
@@ -240,6 +241,26 @@ def test_clean_dataset_produces_no_warnings():
     print("PASS: a clean dataset builds without any warnings")
 
 
+def test_held_out_examples_come_from_the_validation_slice_only():
+    path = _write_bytes_to_temp(
+        "split.jsonl",
+        "\n".join(json.dumps({"instruction": f"q{i}", "output": f"a{i}"}) for i in range(20)).encode("utf-8"),
+    )
+    cfg = DatasetConfig(file_path=path, validation_split=0.2)
+    held_out = held_out_examples(cfg, 3)
+
+    train_part, val_part = split_train_val(load_raw_examples(cfg), cfg.validation_split)
+    assert len(held_out) == 3
+    assert held_out == val_part[:3]
+    assert not any(ex in train_part for ex in held_out)
+    # Same slice build_dataset holds out from training, not just the same function.
+    _, val_tokenized = build_dataset(cfg, FakeTokenizer())
+    assert [format_example(ex, FakeTokenizer()) for ex in held_out] == [
+        v["formatted_text"] for v in val_tokenized[:3]
+    ]
+    print("PASS: held_out_examples returns the first examples of build_dataset's validation slice")
+
+
 if __name__ == "__main__":
     test_load_valid_jsonl()
     test_missing_column_raises_clear_error()
@@ -256,4 +277,5 @@ if __name__ == "__main__":
     test_non_string_and_empty_values_warn_but_still_load()
     test_examples_that_fill_max_sequence_length_warn()
     test_clean_dataset_produces_no_warnings()
+    test_held_out_examples_come_from_the_validation_slice_only()
     print("\nAll data_pipeline.py tests passed.")
