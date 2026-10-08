@@ -171,6 +171,27 @@ def test_uppercase_suffixes_are_accepted():
     print("PASS: .JSONL and .CSV are read the same as .jsonl and .csv")
 
 
+def test_later_row_missing_a_column_names_the_row_and_column():
+    rows = [{"instruction": f"q{i}", "output": f"a{i}"} for i in range(5)] + [{"instruction": "q5"}]
+    path = _write_bytes_to_temp("missing_later.jsonl", "\n".join(json.dumps(r) for r in rows).encode("utf-8"))
+    try:
+        load_raw_examples(DatasetConfig(file_path=path))
+        raise AssertionError("expected ValueError, none raised")
+    except ValueError as e:
+        assert "Row 6" in str(e) and "'output'" in str(e), str(e)
+    print("PASS: a later row without a required column raises ValueError naming row 6 and 'output'")
+
+
+def test_jsonl_line_that_is_not_an_object_raises_a_clear_error():
+    path = _write_bytes_to_temp("array.jsonl", json.dumps([{"instruction": "q", "output": "a"}]).encode("utf-8"))
+    try:
+        load_raw_examples(DatasetConfig(file_path=path))
+        raise AssertionError("expected ValueError, none raised")
+    except ValueError as e:
+        assert "Row 1" in str(e) and "object" in str(e), str(e)
+    print("PASS: a JSON array saved as .jsonl raises a ValueError instead of an AttributeError")
+
+
 if __name__ == "__main__":
     test_load_valid_jsonl()
     test_missing_column_raises_clear_error()
@@ -182,4 +203,6 @@ if __name__ == "__main__":
     test_leading_bom_does_not_corrupt_the_first_column()
     test_non_utf8_file_falls_back_to_the_platform_default_with_a_warning()
     test_uppercase_suffixes_are_accepted()
+    test_later_row_missing_a_column_names_the_row_and_column()
+    test_jsonl_line_that_is_not_an_object_raises_a_clear_error()
     print("\nAll data_pipeline.py tests passed.")

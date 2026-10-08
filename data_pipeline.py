@@ -94,6 +94,15 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
     if not rows:
         raise ValueError(f"Dataset file {path} contains no rows")
 
+    # Rows are counted from 1 without the CSV header or blank lines, which is
+    # how a user scrolling the data in a spreadsheet or editor would count them.
+    for row_number, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"Row {row_number} of {path.name} is a JSON {type(row).__name__}, not an object. "
+                'A .jsonl file needs one object per line, like {"instruction": "...", "output": "..."}.'
+            )
+
     actual_columns = set(rows[0].keys())
     required = {config.prompt_column, config.response_column}
     missing = required - actual_columns
@@ -102,6 +111,16 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
             f"Dataset is missing required column(s): {sorted(missing)}. "
             f"Expected: {sorted(required)}. Found: {sorted(actual_columns)}"
         )
+
+    # The check above only sees the first row. A later row without a key
+    # used to surface as a bare KeyError with no row number.
+    for row_number, row in enumerate(rows, start=1):
+        absent = sorted(required - set(row.keys()))
+        if absent:
+            raise ValueError(
+                f"Row {row_number} of {path.name} is missing required column(s) {absent}. "
+                f"Every row needs: {sorted(required)}."
+            )
 
     return [
         Example(prompt=row[config.prompt_column], response=row[config.response_column])
