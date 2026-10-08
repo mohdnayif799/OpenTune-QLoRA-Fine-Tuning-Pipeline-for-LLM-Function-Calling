@@ -81,9 +81,10 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
     deep inside training.
     """
     path = config.file_path
-    if path.suffix == ".jsonl":
+    suffix = path.suffix.lower()  # Windows and Excel often save DATA.CSV
+    if suffix == ".jsonl":
         rows = [json.loads(line) for line in _read_dataset_text(path).splitlines() if line.strip()]
-    elif path.suffix == ".csv":
+    elif suffix == ".csv":
         # newline="" matches how the file used to be opened, which the csv
         # module needs to keep line breaks inside quoted fields intact.
         rows = list(csv.DictReader(io.StringIO(_read_dataset_text(path), newline="")))

@@ -163,6 +163,14 @@ def test_non_utf8_file_falls_back_to_the_platform_default_with_a_warning():
     print("PASS: a non UTF-8 file still loads through the old platform default, with a warning")
 
 
+def test_uppercase_suffixes_are_accepted():
+    jsonl = _write_bytes_to_temp("UPPER.JSONL", b'{"instruction": "q", "output": "a"}\n')
+    csv_path = _write_bytes_to_temp("UPPER.CSV", b"instruction,output\nq,a\n")
+    assert load_raw_examples(DatasetConfig(file_path=jsonl)) == [{"prompt": "q", "response": "a"}]
+    assert load_raw_examples(DatasetConfig(file_path=csv_path)) == [{"prompt": "q", "response": "a"}]
+    print("PASS: .JSONL and .CSV are read the same as .jsonl and .csv")
+
+
 if __name__ == "__main__":
     test_load_valid_jsonl()
     test_missing_column_raises_clear_error()
@@ -173,4 +181,5 @@ if __name__ == "__main__":
     test_utf8_text_is_read_as_utf8_on_every_platform()
     test_leading_bom_does_not_corrupt_the_first_column()
     test_non_utf8_file_falls_back_to_the_platform_default_with_a_warning()
+    test_uppercase_suffixes_are_accepted()
     print("\nAll data_pipeline.py tests passed.")
