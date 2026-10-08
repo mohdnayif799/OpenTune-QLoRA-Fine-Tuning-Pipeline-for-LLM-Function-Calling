@@ -14,6 +14,7 @@ Colab tunnel or a rented GPU box) - see design doc Section 25.
 from __future__ import annotations
 
 import html
+import re
 import tempfile
 from pathlib import Path
 
@@ -86,6 +87,31 @@ def _render_assistant_message(text: str) -> None:
     """Draw a model turn as plain text in a bare container, which never draws an avatar."""
     with st.container():
         st.markdown(text)
+
+
+RUN_NAME_FILE_PART_MAX_CHARS = 60
+
+
+def _run_name_for(model_display_name: str, upload_name: str) -> str:
+    """
+    Name a run after the model and the uploaded file. train.py uses the run
+    name as the folder for checkpoints and logs, and runs that differed only
+    in their dataset used to share one folder.
+
+    RunConfig accepts any string here, so the cleaning follows that folder
+    use on Windows and Linux: each run of characters other than letters,
+    digits, ".", "(", ")" and "-" becomes "-", and trailing dots and dashes
+    (Windows drops trailing dots from folder names) are removed. Registry
+    display names come out exactly as the old replace(" ", "-") made them.
+    The file part is capped to keep checkpoint paths short.
+    """
+
+    def clean(text: str) -> str:
+        return re.sub(r"[^\w.()-]+", "-", text).strip(".-")
+
+    model_part = clean(model_display_name)
+    file_part = clean(Path(upload_name).stem)[:RUN_NAME_FILE_PART_MAX_CHARS].strip(".-")
+    return f"run-{model_part}-{file_part}" if file_part else f"run-{model_part}"
 
 
 tab_setup, tab_train, tab_eval, tab_chat = st.tabs(
@@ -204,7 +230,7 @@ with tab_train:
             # from training itself still surface unchanged.
             try:
                 run_config = RunConfig(
-                    run_name=f"run-{selected_model.display_name}".replace(" ", "-"),
+                    run_name=_run_name_for(selected_model.display_name, setup["uploaded_file"].name),
                     base_model_id=st.session_state["_setup"]["model_key"],
                     dataset=DatasetConfig(
                         file_path=dataset_path,

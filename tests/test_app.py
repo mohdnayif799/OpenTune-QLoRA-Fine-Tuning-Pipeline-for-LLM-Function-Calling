@@ -223,6 +223,29 @@ def test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name():
     print("PASS: upload is saved under tempfile.gettempdir() using only the file's base name")
 
 
+def test_run_name_includes_the_cleaned_upload_name():
+    """
+    train.py uses run_name as one folder under checkpoints/ and logs/, so two
+    uploads must not share it, and it must stay a single valid folder name.
+    """
+    import tempfile
+
+    cases = {
+        "My Data, v2 (final)..jsonl": "run-Phi-3-Mini-(3.8B)-My-Data-v2-(final)",
+        "!!!.jsonl": "run-Phi-3-Mini-(3.8B)",  # nothing usable left: model part only
+    }
+    for upload_name, expected in cases.items():
+        at, received = _start_fine_tuning_with_fake_training(upload_name)
+        try:
+            assert not at.exception, f"Start Fine-Tuning raised: {at.exception}"
+            run_name = received[0].run_name
+            assert run_name == expected, run_name
+            assert Path(run_name).name == run_name  # one path component
+        finally:
+            (Path(tempfile.gettempdir()) / upload_name).unlink(missing_ok=True)
+    print("PASS: run_name carries the cleaned upload name, so different uploads get different folders")
+
+
 def test_invalid_run_config_shows_an_error_instead_of_a_traceback():
     import tempfile
 
@@ -308,6 +331,7 @@ if __name__ == "__main__":
     test_chat_assistant_turn_renders_as_plain_markdown()
     test_chat_submit_appends_one_turn_each_and_renders_answer()
     test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name()
+    test_run_name_includes_the_cleaned_upload_name()
     test_invalid_run_config_shows_an_error_instead_of_a_traceback()
     test_gated_warning_names_the_login_paths_that_exist()
     test_run_evaluation_uses_held_out_rows_and_greedy_decoding()
