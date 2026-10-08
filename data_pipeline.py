@@ -17,8 +17,11 @@ an actual HF AutoTokenizer, which satisfies the same protocol.
 from __future__ import annotations
 
 import csv
+import io
 import json
+import locale
 import random
+import warnings
 from pathlib import Path
 from typing import Protocol, TypedDict
 
@@ -46,6 +49,28 @@ class TokenizedExample(TypedDict):
     formatted_text: str
 
 
+def _read_dataset_text(path: Path) -> str:
+    """
+    Decode a dataset file as UTF-8, dropping a leading BOM (Excel writes one).
+
+    Reads used to rely on the platform default encoding, which is cp1252 on
+    most Windows machines and silently turned UTF-8 text such as "café" into
+    "cafÃ©". A file that is not valid UTF-8 still falls back to that platform
+    default, with a warning, so a file that loaded before still loads.
+    """
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        fallback = locale.getpreferredencoding(False)
+        warnings.warn(
+            f"{path.name} is not valid UTF-8, so it was decoded with the platform "
+            f"default encoding ({fallback}). Save it as UTF-8 if any characters look wrong.",
+            stacklevel=3,
+        )
+        return raw.decode(fallback)
+
+
 def load_raw_examples(config: DatasetConfig) -> list[Example]:
     """
     Load a CSV or JSONL file and map its configured columns to {prompt, response}.
@@ -57,10 +82,11 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
     """
     path = config.file_path
     if path.suffix == ".jsonl":
-        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        rows = [json.loads(line) for line in _read_dataset_text(path).splitlines() if line.strip()]
     elif path.suffix == ".csv":
-        with path.open(newline="") as f:
-            rows = list(csv.DictReader(f))
+        # newline="" matches how the file used to be opened, which the csv
+        # module needs to keep line breaks inside quoted fields intact.
+        rows = list(csv.DictReader(io.StringIO(_read_dataset_text(path), newline="")))
     else:
         raise ValueError(f"Unsupported dataset format: '{path.suffix}'. Expected .csv or .jsonl")
 
