@@ -192,6 +192,54 @@ def test_jsonl_line_that_is_not_an_object_raises_a_clear_error():
     print("PASS: a JSON array saved as .jsonl raises a ValueError instead of an AttributeError")
 
 
+def _messages_of(caught) -> list[str]:
+    return [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+
+
+def test_non_string_and_empty_values_warn_but_still_load():
+    rows = [
+        {"instruction": "q1", "output": None},
+        {"instruction": "q2", "output": 42},
+        {"instruction": "", "output": "a3"},
+        {"instruction": "q4", "output": "a4"},
+    ]
+    path = _write_bytes_to_temp("odd_values.jsonl", "\n".join(json.dumps(r) for r in rows).encode("utf-8"))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        examples = load_raw_examples(DatasetConfig(file_path=path))
+    assert len(examples) == 4 and examples[1]["response"] == 42  # values pass through unchanged
+    messages = _messages_of(caught)
+    assert any("not text" in m and "[1, 2]" in m for m in messages), messages
+    assert any("empty" in m and "[3]" in m for m in messages), messages
+    print("PASS: non-string and empty values load unchanged and produce warnings naming their rows")
+
+
+def test_examples_that_fill_max_sequence_length_warn():
+    path = _write_bytes_to_temp(
+        "long.jsonl",
+        "\n".join(json.dumps({"instruction": "q", "output": "word " * 40}) for _ in range(4)).encode("utf-8"),
+    )
+    cfg = DatasetConfig(file_path=path, validation_split=0.25, max_sequence_length=8)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        train, val = build_dataset(cfg, FakeTokenizer())
+    assert len(train) == 3 and len(val) == 1  # still built, only warned
+    assert any("max_sequence_length=8" in m for m in _messages_of(caught)), _messages_of(caught)
+    print("PASS: examples cut at max_sequence_length are reported with a warning, not an error")
+
+
+def test_clean_dataset_produces_no_warnings():
+    path = _write_bytes_to_temp(
+        "clean.jsonl",
+        "\n".join(json.dumps({"instruction": f"q{i}", "output": f"a{i}"}) for i in range(5)).encode("utf-8"),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build_dataset(DatasetConfig(file_path=path, max_sequence_length=32), FakeTokenizer())
+    assert _messages_of(caught) == []
+    print("PASS: a clean dataset builds without any warnings")
+
+
 if __name__ == "__main__":
     test_load_valid_jsonl()
     test_missing_column_raises_clear_error()
@@ -205,4 +253,7 @@ if __name__ == "__main__":
     test_uppercase_suffixes_are_accepted()
     test_later_row_missing_a_column_names_the_row_and_column()
     test_jsonl_line_that_is_not_an_object_raises_a_clear_error()
+    test_non_string_and_empty_values_warn_but_still_load()
+    test_examples_that_fill_max_sequence_length_warn()
+    test_clean_dataset_produces_no_warnings()
     print("\nAll data_pipeline.py tests passed.")

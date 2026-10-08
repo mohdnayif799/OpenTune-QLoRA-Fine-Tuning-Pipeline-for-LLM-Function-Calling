@@ -122,10 +122,43 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
                 f"Every row needs: {sorted(required)}."
             )
 
-    return [
+    examples = [
         Example(prompt=row[config.prompt_column], response=row[config.response_column])
         for row in rows
     ]
+    _warn_about_suspect_values(examples, path)
+    return examples
+
+
+def _warn_about_suspect_values(examples: list[Example], path: Path) -> None:
+    """
+    Warn, never raise, about values that are not non-empty text.
+
+    They reach the chat template unchanged. Phi-3's template joins content
+    with "+" and raises a TypeError on them; other templates may render a
+    Python repr such as "None" that the model would then learn. This only
+    warns because a dataset that trains today has to keep training.
+    """
+    non_text_rows, empty_rows = [], []
+    for row_number, example in enumerate(examples, start=1):
+        values = (example["prompt"], example["response"])
+        if not all(isinstance(value, str) for value in values):
+            non_text_rows.append(row_number)
+        elif not all(value.strip() for value in values):
+            empty_rows.append(row_number)
+    if non_text_rows:
+        warnings.warn(
+            f"{len(non_text_rows)} row(s) of {path.name} have a prompt or response that is "
+            f"not text (a number, list, object or null), e.g. rows {non_text_rows[:10]}. "
+            "They are passed to the chat template as they are.",
+            stacklevel=3,
+        )
+    if empty_rows:
+        warnings.warn(
+            f"{len(empty_rows)} row(s) of {path.name} have an empty prompt or response, "
+            f"e.g. rows {empty_rows[:10]}.",
+            stacklevel=3,
+        )
 
 
 def format_example(example: Example, tokenizer: TokenizerProtocol) -> str:
@@ -172,4 +205,23 @@ def build_dataset(
             for ex in examples
         ]
 
-    return process(train_raw), process(val_raw)
+    train, val = process(train_raw), process(val_raw)
+    _warn_about_truncation(train + val, config.max_sequence_length)
+    return train, val
+
+
+def _warn_about_truncation(tokenized: list[TokenizedExample], max_length: int) -> None:
+    """
+    Truncation is silent and keeps the start of the text. The response and
+    the end-of-sequence token come last, so a cut example loses those first
+    and never shows the model where its answer ends. This only warns, since
+    raising would stop datasets that train today.
+    """
+    filled = sum(1 for ex in tokenized if sum(ex["attention_mask"]) >= max_length)
+    if filled:
+        warnings.warn(
+            f"{filled} of {len(tokenized)} example(s) reached max_sequence_length={max_length} "
+            "tokens and were probably cut, which removes the end of the response and the "
+            "end-of-sequence token. Raise max_sequence_length or shorten those examples.",
+            stacklevel=3,
+        )
