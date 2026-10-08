@@ -11,9 +11,15 @@ and real model weights neither this sandbox nor these tests have. What's
 tested here is that the app renders without error and every expected widget
 exists with correct options - not that the training/eval/chat flows work
 end to end. That needs your Colab environment, same boundary as train.py.
+
+The Chat tab tests at the end are the one exception: they unlock the tab with
+a stand-in object instead of a loaded model and patch
+inference.generate_response, so the rendering and the submit flow run
+without a GPU. They still say nothing about what a real model would answer.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
@@ -110,6 +116,68 @@ def test_setup_tab_has_load_adapter_button():
     print("PASS: 'Load Adapter' button is present in Setup tab")
 
 
+def _new_unlocked_chat_app_test(history: list[tuple[str, str]]) -> AppTest:
+    """
+    The Chat tab only checks that loaded_chat_model is not None, so a plain
+    object() unlocks it without loading weights. Seeding chat_history before
+    the first run is how a returning user's conversation looks to the script.
+    """
+    at = _new_app_test()
+    at.session_state["loaded_chat_model"] = object()
+    at.session_state["chat_history"] = list(history)
+    return at
+
+
+def _user_bubbles(at: AppTest) -> list[str]:
+    """The CSS block mentions .user-msg too, so match the class attribute, not the name."""
+    return [m.value for m in at.markdown if 'class="user-msg"' in m.value]
+
+
+def test_chat_tab_renders_without_chat_message_avatars():
+    at = _new_unlocked_chat_app_test([("user", "hello"), ("assistant", "hi there")])
+    at.run()
+    assert not at.exception, f"Chat tab raised on render: {at.exception}"
+    assert len(at.chat_message) == 0
+    print("PASS: Chat tab renders history without st.chat_message, so no avatars are drawn")
+
+
+def test_chat_user_bubble_escapes_html_and_keeps_markdown_literal():
+    at = _new_unlocked_chat_app_test([("user", "<b>x</b> *y* __init__.py\n\nz")])
+    at.run()
+    assert not at.exception
+    bubbles = _user_bubbles(at)
+    assert len(bubbles) == 1
+    bubble = bubbles[0]
+    assert "&lt;b&gt;x&lt;/b&gt;" in bubble
+    assert "*y* __init__.py" in bubble
+    assert "<b>" not in bubble
+    assert "\n" not in bubble
+    print("PASS: user bubble shows HTML and Markdown characters exactly as typed, on one HTML line")
+
+
+def test_chat_assistant_turn_renders_as_plain_markdown():
+    answer = "Plain answer with **bold** text."
+    at = _new_unlocked_chat_app_test([("user", "q"), ("assistant", answer)])
+    at.run()
+    assert not at.exception
+    assert answer in [m.value for m in at.markdown]
+    print("PASS: assistant turn is a bare markdown element with its exact text")
+
+
+def test_chat_submit_appends_one_turn_each_and_renders_answer():
+    at = _new_unlocked_chat_app_test([])
+    # app.py does `from inference import generate_response` on every script
+    # run, so patching the module attribute is what the script picks up.
+    with patch("inference.generate_response", return_value="patched answer"):
+        at.run()
+        at.chat_input[0].set_value("hi").run()
+    assert not at.exception, f"Chat submit raised: {at.exception}"
+    assert at.session_state["chat_history"] == [("user", "hi"), ("assistant", "patched answer")]
+    assert len(_user_bubbles(at)) == 1
+    assert "patched answer" in [m.value for m in at.markdown]
+    print("PASS: submitting a question adds one user and one assistant turn and renders both")
+
+
 if __name__ == "__main__":
     test_app_runs_without_error()
     test_model_dropdown_lists_all_registered_models()
@@ -119,4 +187,8 @@ if __name__ == "__main__":
     test_evaluate_tab_shows_prompt_when_no_training_yet()
     test_chat_tab_locked_with_nothing_loaded_yet()
     test_setup_tab_has_load_adapter_button()
+    test_chat_tab_renders_without_chat_message_avatars()
+    test_chat_user_bubble_escapes_html_and_keeps_markdown_literal()
+    test_chat_assistant_turn_renders_as_plain_markdown()
+    test_chat_submit_appends_one_turn_each_and_renders_answer()
     print("\nAll app.py structural tests passed (UI wiring - NOT the GPU-bound flows).")

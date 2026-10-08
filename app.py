@@ -13,6 +13,7 @@ Colab tunnel or a rented GPU box) - see design doc Section 25.
 
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 import streamlit as st
@@ -37,6 +38,54 @@ for key, default in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+CHAT_CSS = """
+<style>
+.user-msg-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: 1.75rem 0 0.55rem 0;
+}
+.user-msg {
+    max-width: min(56%, 36rem);
+    background: rgba(59, 130, 246, 0.10);
+    border: 1px solid rgba(59, 130, 246, 0.20);
+    border-radius: 1.15rem 1.15rem 0.35rem 1.15rem;
+    padding: 0.7rem 1.05rem;
+    font-size: 0.95rem;
+    line-height: 1.55;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+    .user-msg { max-width: 86%; }
+}
+</style>
+"""
+
+
+def _render_user_message(text: str) -> None:
+    """
+    Draw a user turn as a right-aligned bubble with no avatar.
+
+    The text is HTML escaped instead of going through Markdown, so a question
+    containing *asterisks*, __init__.py, <b> or $ shows exactly as typed.
+    Newlines become <br> after escaping, because Markdown ends an HTML block
+    at the first blank line.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    safe = html.escape(normalized).replace("\n", "<br>")
+    st.markdown(
+        f'<div class="user-msg-row"><div class="user-msg">{safe}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_assistant_message(text: str) -> None:
+    """Draw a model turn as plain text in a bare container, which never draws an avatar."""
+    with st.container():
+        st.markdown(text)
+
 
 tab_setup, tab_train, tab_eval, tab_chat = st.tabs(
     ["1. Setup", "2. Configure & Train", "3. Evaluate", "4. Chat"]
@@ -253,18 +302,32 @@ with tab_chat:
         if "chat_history" not in st.session_state:
             st.session_state["chat_history"] = []
 
-        for role, msg in st.session_state["chat_history"]:
-            with st.chat_message(role):
-                st.write(msg)
+        st.markdown(CHAT_CSS, unsafe_allow_html=True)
 
+        # st.chat_input inside a tab is drawn inline, not pinned to the bottom
+        # of the page. The history lives in a container created above the input
+        # so the new question and the spinner appear above the input box.
+        history_area = st.container()
         user_msg = st.chat_input("Ask the fine-tuned model something...")
+
+        with history_area:
+            for role, msg in st.session_state["chat_history"]:
+                if role == "user":
+                    _render_user_message(msg)
+                else:
+                    _render_assistant_message(msg)
+
         if user_msg:
             st.session_state["chat_history"].append(("user", user_msg))
-            if st.session_state["loaded_chat_model"] is None:
-                st.session_state["loaded_chat_model"] = load_finetuned_model(
-                    base_model_id=st.session_state["run_config"].base_model_id,
-                    adapter_path=Path(st.session_state["training_result"].adapter_path),
-                )
-            response = generate_response(st.session_state["loaded_chat_model"], user_msg)
+            with history_area:
+                _render_user_message(user_msg)  # show the question straight away
+                with st.container():
+                    with st.spinner("Generating..."):
+                        if st.session_state["loaded_chat_model"] is None:
+                            st.session_state["loaded_chat_model"] = load_finetuned_model(
+                                base_model_id=st.session_state["run_config"].base_model_id,
+                                adapter_path=Path(st.session_state["training_result"].adapter_path),
+                            )
+                        response = generate_response(st.session_state["loaded_chat_model"], user_msg)
             st.session_state["chat_history"].append(("assistant", response))
             st.rerun()
