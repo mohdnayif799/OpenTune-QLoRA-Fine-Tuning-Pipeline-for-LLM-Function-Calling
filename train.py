@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from config import RunConfig
-from data_pipeline import build_dataset
+from data_pipeline import build_dataset, load_raw_examples
 from model_registry import get_model
 
 
@@ -198,6 +198,11 @@ def run_training(
         from trl import SFTTrainer
 
         trainer_cls = SFTTrainer
+
+    # Read and validate the dataset before anything is downloaded or loaded:
+    # a wrong column name otherwise surfaces from build_dataset only after the
+    # tokenizer download and the 4-bit model load, minutes into the run.
+    load_raw_examples(run_config.dataset)
 
     model_entry = get_model(run_config.base_model_id)
     output_dir = checkpoints_dir / run_config.run_name

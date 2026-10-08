@@ -277,6 +277,36 @@ def test_all_checkpoints_incomplete_falls_back_to_fresh_start():
     shutil.rmtree(checkpoints_dir, ignore_errors=True)
 
 
+def test_run_training_rejects_a_bad_column_before_loading_anything():
+    """
+    A wrong column name is the most common setup mistake. It has to fail in
+    seconds, before the tokenizer download and the 4-bit model load, not
+    minutes later inside build_dataset.
+    """
+    import tempfile
+
+    _FakeTrainer.calls = []
+    workdir = Path(tempfile.mkdtemp())
+    cfg = RunConfig(
+        run_name="bad-column",
+        base_model_id="mistral-7b",
+        dataset=DatasetConfig(file_path=DUMMY_DATASET, response_column="answer"),
+        training=TrainingConfig(force_cpu=True),
+    )
+    try:
+        run_training(
+            cfg, checkpoints_dir=workdir / "checkpoints", logs_dir=workdir / "logs",
+            model_loader=_fake_model_loader, tokenizer_loader=_fake_tokenizer_loader,
+            trainer_cls=_FakeTrainer,
+        )
+        raise AssertionError("expected ValueError, none raised")
+    except ValueError as e:
+        assert "answer" in str(e)
+    assert _FakeTrainer.calls == [], f"loaded before validating the dataset: {_FakeTrainer.calls}"
+    print("PASS: a missing column fails before the tokenizer or model is loaded")
+    shutil.rmtree(workdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_bnb_config_uses_run_configs_quantization_setting()
     test_lora_config_pulls_target_modules_from_registry_not_run_config()
@@ -287,4 +317,5 @@ if __name__ == "__main__":
     test_run_training_resumes_from_existing_checkpoint()
     test_incomplete_newest_checkpoint_falls_back_to_last_complete_one()
     test_all_checkpoints_incomplete_falls_back_to_fresh_start()
+    test_run_training_rejects_a_bad_column_before_loading_anything()
     print("\nAll train.py tests passed (config + orchestration logic - NOT a real GPU training run).")
