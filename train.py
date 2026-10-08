@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from config import RunConfig
-from data_pipeline import build_dataset
+from data_pipeline import build_dataset, load_raw_examples
 from model_registry import get_model
 
 
@@ -36,9 +36,11 @@ class TrainingResult:
     run_name: str
     adapter_path: str
     final_train_loss: float
+    # Always None today: build_training_arguments sets no eval strategy or
+    # metric_for_best_model, so the trainer never records a best_metric.
     final_eval_loss: float | None
     num_steps_completed: int
-    stopped_early: bool
+    stopped_early: bool  # always False: no early stopping callback is attached
 
 
 def _to_hf_dataset(tokenized_examples: list) -> "Dataset":
@@ -166,6 +168,66 @@ def _find_last_complete_checkpoint(output_dir: Path) -> str | None:
     return None
 
 
+RESUME_FINGERPRINT_NAME = "opentune_resume_fingerprint.json"
+
+
+def _resume_fingerprint(run_config: RunConfig) -> dict:
+    """
+    Everything that has to match for a checkpoint to be a valid resume point.
+
+    The dataset is identified by a hash of its bytes, not its path: the app
+    writes every upload to the same temp folder, so a different dataset can
+    arrive under the same path, and the same dataset under a new one.
+    """
+    import hashlib
+
+    data = json.loads(run_config.model_dump_json())
+    data.pop("run_name")
+    data["dataset"].pop("file_path")
+    data["dataset_sha256"] = hashlib.sha256(run_config.dataset.file_path.read_bytes()).hexdigest()
+    return data
+
+
+def _check_resume_matches(run_config: RunConfig, output_dir: Path) -> None:
+    """
+    Refuse to resume a checkpoint written by a different run under the same
+    run_name. Without this, a second run finds the first run's final
+    checkpoint, trains zero steps when the old step count already covers the
+    new run, reports a train loss of 0.0 and saves the first run's adapter.
+    """
+    saved = output_dir / RESUME_FINGERPRINT_NAME
+    if not saved.exists():
+        print(
+            f"WARNING: {output_dir} has checkpoints but no {RESUME_FINGERPRINT_NAME}, so "
+            "OpenTune cannot check they came from this dataset and config. Resuming anyway."
+        )
+        return
+    if json.loads(saved.read_text()) != _resume_fingerprint(run_config):
+        raise ValueError(
+            f"{output_dir} holds checkpoints from a run with a different dataset or "
+            "settings. Choose a new run_name, or delete that folder to start fresh."
+        )
+
+
+def _warn_if_no_cuda(run_config: RunConfig) -> None:
+    """
+    Without CUDA the failure otherwise comes from deep inside bitsandbytes or
+    from SFTConfig's bf16 check, neither of which names the real cause. This
+    only prints: whether a given setup can run is decided by those libraries,
+    not here.
+    """
+    if run_config.training.force_cpu:
+        return
+    import torch
+
+    if not torch.cuda.is_available():
+        print(
+            "WARNING: No CUDA device is visible and force_cpu is False. Loading the base "
+            "model in 4-bit (bitsandbytes) and bf16 training both expect an NVIDIA GPU, so "
+            "this run is likely to fail. On Colab, switch the runtime to a GPU."
+        )
+
+
 def run_training(
     run_config: RunConfig,
     checkpoints_dir: Path,
@@ -199,6 +261,12 @@ def run_training(
 
         trainer_cls = SFTTrainer
 
+    # Read and validate the dataset before anything is downloaded or loaded:
+    # a wrong column name otherwise surfaces from build_dataset only after the
+    # tokenizer download and the 4-bit model load, minutes into the run.
+    load_raw_examples(run_config.dataset)
+    _warn_if_no_cuda(run_config)
+
     model_entry = get_model(run_config.base_model_id)
     output_dir = checkpoints_dir / run_config.run_name
 
@@ -217,7 +285,10 @@ def run_training(
     if output_dir.exists():
         resume_from_checkpoint = _find_last_complete_checkpoint(output_dir)
         if resume_from_checkpoint is not None:
+            _check_resume_matches(run_config, output_dir)
             print(f"Found existing checkpoint at {resume_from_checkpoint} - resuming, not restarting from step 0.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / RESUME_FINGERPRINT_NAME).write_text(json.dumps(_resume_fingerprint(run_config), indent=2))
 
     tokenizer = tokenizer_loader(model_entry.repo_id)
     bnb_config = build_bnb_config(run_config)
@@ -246,7 +317,7 @@ def run_training(
         final_train_loss=train_result.training_loss,
         final_eval_loss=getattr(trainer.state, "best_metric", None),
         num_steps_completed=trainer.state.global_step,
-        stopped_early=False,  # updated once early-stopping callback is wired in
+        stopped_early=False,  # no early stopping callback; see TrainingConfig.early_stopping_patience
     )
     save_run_log(run_config, result, logs_dir)
     return result

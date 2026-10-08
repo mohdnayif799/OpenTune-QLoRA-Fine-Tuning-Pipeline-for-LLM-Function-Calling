@@ -11,9 +11,15 @@ and real model weights neither this sandbox nor these tests have. What's
 tested here is that the app renders without error and every expected widget
 exists with correct options - not that the training/eval/chat flows work
 end to end. That needs your Colab environment, same boundary as train.py.
+
+The Chat tab tests at the end are the one exception: they unlock the tab with
+a stand-in object instead of a loaded model and patch
+inference.generate_response, so the rendering and the submit flow run
+without a GPU. They still say nothing about what a real model would answer.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
@@ -110,6 +116,207 @@ def test_setup_tab_has_load_adapter_button():
     print("PASS: 'Load Adapter' button is present in Setup tab")
 
 
+def _new_unlocked_chat_app_test(history: list[tuple[str, str]]) -> AppTest:
+    """
+    The Chat tab only checks that loaded_chat_model is not None, so a plain
+    object() unlocks it without loading weights. Seeding chat_history before
+    the first run is how a returning user's conversation looks to the script.
+    """
+    at = _new_app_test()
+    at.session_state["loaded_chat_model"] = object()
+    at.session_state["chat_history"] = list(history)
+    return at
+
+
+def _user_bubbles(at: AppTest) -> list[str]:
+    """The CSS block mentions .user-msg too, so match the class attribute, not the name."""
+    return [m.value for m in at.markdown if 'class="user-msg"' in m.value]
+
+
+def test_chat_tab_renders_without_chat_message_avatars():
+    at = _new_unlocked_chat_app_test([("user", "hello"), ("assistant", "hi there")])
+    at.run()
+    assert not at.exception, f"Chat tab raised on render: {at.exception}"
+    assert len(at.chat_message) == 0
+    print("PASS: Chat tab renders history without st.chat_message, so no avatars are drawn")
+
+
+def test_chat_user_bubble_escapes_html_and_keeps_markdown_literal():
+    at = _new_unlocked_chat_app_test([("user", "<b>x</b> *y* __init__.py\n\nz")])
+    at.run()
+    assert not at.exception
+    bubbles = _user_bubbles(at)
+    assert len(bubbles) == 1
+    bubble = bubbles[0]
+    assert "&lt;b&gt;x&lt;/b&gt;" in bubble
+    assert "*y* __init__.py" in bubble
+    assert "<b>" not in bubble
+    assert "\n" not in bubble
+    print("PASS: user bubble shows HTML and Markdown characters exactly as typed, on one HTML line")
+
+
+def test_chat_assistant_turn_renders_as_plain_markdown():
+    answer = "Plain answer with **bold** text."
+    at = _new_unlocked_chat_app_test([("user", "q"), ("assistant", answer)])
+    at.run()
+    assert not at.exception
+    assert answer in [m.value for m in at.markdown]
+    print("PASS: assistant turn is a bare markdown element with its exact text")
+
+
+def test_chat_submit_appends_one_turn_each_and_renders_answer():
+    at = _new_unlocked_chat_app_test([])
+    # app.py does `from inference import generate_response` on every script
+    # run, so patching the module attribute is what the script picks up.
+    with patch("inference.generate_response", return_value="patched answer"):
+        at.run()
+        at.chat_input[0].set_value("hi").run()
+    assert not at.exception, f"Chat submit raised: {at.exception}"
+    assert at.session_state["chat_history"] == [("user", "hi"), ("assistant", "patched answer")]
+    assert len(_user_bubbles(at)) == 1
+    assert "patched answer" in [m.value for m in at.markdown]
+    print("PASS: submitting a question adds one user and one assistant turn and renders both")
+
+
+def _start_fine_tuning_with_fake_training(upload_name: str, learning_rate: float | None = None):
+    """
+    Drive the Train tab up to run_training without a GPU: the upload goes
+    through the real file_uploader widget, and train.run_training is patched
+    (app.py imports it by name on every script run) to record the RunConfig
+    it was handed instead of training.
+    """
+    from train import TrainingResult
+
+    received = []
+
+    def fake_run_training(run_config, checkpoints_dir, logs_dir):
+        received.append(run_config)
+        return TrainingResult(
+            run_name=run_config.run_name, adapter_path="fake", final_train_loss=0.5,
+            final_eval_loss=None, num_steps_completed=1, stopped_early=False,
+        )
+
+    at = _new_app_test()
+    with patch("train.run_training", side_effect=fake_run_training):
+        at.run()
+        at.file_uploader[0].set_value(
+            (upload_name, b'{"instruction": "q", "output": "a"}\n', "application/json")
+        ).run()
+        if learning_rate is not None:
+            [n for n in at.number_input if n.label == "Learning rate"][0].set_value(learning_rate).run()
+        [b for b in at.button if b.label == "Start Fine-Tuning"][0].click().run()
+    return at, received
+
+
+def test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name():
+    import tempfile
+
+    at, received = _start_fine_tuning_with_fake_training("nested/dir/upload_probe.jsonl")
+    assert not at.exception, f"Start Fine-Tuning raised: {at.exception}"
+    assert len(received) == 1
+    written = received[0].dataset.file_path
+    try:
+        assert written.parent == Path(tempfile.gettempdir())
+        assert written.name == "upload_probe.jsonl"
+    finally:
+        written.unlink(missing_ok=True)
+    print("PASS: upload is saved under tempfile.gettempdir() using only the file's base name")
+
+
+def test_run_name_includes_the_cleaned_upload_name():
+    """
+    train.py uses run_name as one folder under checkpoints/ and logs/, so two
+    uploads must not share it, and it must stay a single valid folder name.
+    """
+    import tempfile
+
+    cases = {
+        "My Data, v2 (final)..jsonl": "run-Phi-3-Mini-(3.8B)-My-Data-v2-(final)",
+        "!!!.jsonl": "run-Phi-3-Mini-(3.8B)",  # nothing usable left: model part only
+    }
+    for upload_name, expected in cases.items():
+        at, received = _start_fine_tuning_with_fake_training(upload_name)
+        try:
+            assert not at.exception, f"Start Fine-Tuning raised: {at.exception}"
+            run_name = received[0].run_name
+            assert run_name == expected, run_name
+            assert Path(run_name).name == run_name  # one path component
+        finally:
+            (Path(tempfile.gettempdir()) / upload_name).unlink(missing_ok=True)
+    print("PASS: run_name carries the cleaned upload name, so different uploads get different folders")
+
+
+def test_invalid_run_config_shows_an_error_instead_of_a_traceback():
+    import tempfile
+
+    at, received = _start_fine_tuning_with_fake_training("lr_zero_probe.jsonl", learning_rate=0.0)
+    try:
+        assert not at.exception, f"invalid config surfaced as a raw exception: {at.exception}"
+        assert received == [], "run_training must not be called with an invalid configuration"
+        assert any("learning_rate" in e.value for e in at.error)
+        # The tabs after Train must still render in the same run.
+        assert [t.label for t in at.tabs][-1] == "4. Chat"
+    finally:
+        (Path(tempfile.gettempdir()) / "lr_zero_probe.jsonl").unlink(missing_ok=True)
+    print("PASS: a learning rate of 0 shows st.error naming the field and never starts training")
+
+
+def test_gated_warning_names_the_login_paths_that_exist():
+    at = _new_app_test()
+    at.run()
+    at.selectbox[0].select("Llama 3 8B Instruct (gated)").run()
+    warnings = [w.value for w in at.warning if "gated" in w.value.lower()]
+    assert any("HF_TOKEN" in w for w in warnings)
+    print("PASS: gated warning points at Hugging Face login or HF_TOKEN, since the app has no token field")
+
+
+def test_run_evaluation_uses_held_out_rows_and_greedy_decoding():
+    """
+    Only the wiring is checked: weights are never loaded (from_pretrained is
+    patched) and generate_response is patched to record how it was called.
+    """
+    import json
+    import tempfile
+
+    from config import DatasetConfig, RunConfig
+    from data_pipeline import held_out_examples
+    from train import TrainingResult
+
+    dataset = Path(tempfile.mkdtemp()) / "eval.jsonl"
+    dataset.write_text(
+        "\n".join(json.dumps({"instruction": f"q{i}", "output": f"a{i}"}) for i in range(20)),
+        encoding="utf-8",
+    )
+    run_config = RunConfig(
+        run_name="eval-wiring", base_model_id="phi-3-mini",
+        dataset=DatasetConfig(file_path=dataset, validation_split=0.2),
+    )
+    calls = []
+
+    def fake_generate(loaded, instruction, max_new_tokens=256, temperature=0.7):
+        calls.append((instruction, max_new_tokens, temperature))
+        return "out"
+
+    at = _new_app_test()
+    at.session_state["run_config"] = run_config
+    at.session_state["training_result"] = TrainingResult(
+        run_name="eval-wiring", adapter_path="fake", final_train_loss=0.5,
+        final_eval_loss=None, num_steps_completed=1, stopped_early=False,
+    )
+    at.session_state["loaded_chat_model"] = object()
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=object()), \
+            patch("transformers.AutoModelForCausalLM.from_pretrained", return_value=object()), \
+            patch("inference.generate_response", side_effect=fake_generate):
+        at.run()
+        [b for b in at.button if b.label == "Run Evaluation"][0].click().run()
+
+    assert not at.exception, f"Run Evaluation raised: {at.exception}"
+    expected = [ex["prompt"] for ex in held_out_examples(run_config.dataset, 3)]
+    assert [c[0] for c in calls] == [p for p in expected for _ in (0, 1)]  # base then fine-tuned
+    assert all(c[1] == 150 and c[2] == 0 for c in calls), calls
+    print("PASS: Evaluate tab scores 3 held-out rows with greedy decoding and 150 new tokens")
+
+
 if __name__ == "__main__":
     test_app_runs_without_error()
     test_model_dropdown_lists_all_registered_models()
@@ -119,4 +326,13 @@ if __name__ == "__main__":
     test_evaluate_tab_shows_prompt_when_no_training_yet()
     test_chat_tab_locked_with_nothing_loaded_yet()
     test_setup_tab_has_load_adapter_button()
+    test_chat_tab_renders_without_chat_message_avatars()
+    test_chat_user_bubble_escapes_html_and_keeps_markdown_literal()
+    test_chat_assistant_turn_renders_as_plain_markdown()
+    test_chat_submit_appends_one_turn_each_and_renders_answer()
+    test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name()
+    test_run_name_includes_the_cleaned_upload_name()
+    test_invalid_run_config_shows_an_error_instead_of_a_traceback()
+    test_gated_warning_names_the_login_paths_that_exist()
+    test_run_evaluation_uses_held_out_rows_and_greedy_decoding()
     print("\nAll app.py structural tests passed (UI wiring - NOT the GPU-bound flows).")

@@ -17,8 +17,11 @@ an actual HF AutoTokenizer, which satisfies the same protocol.
 from __future__ import annotations
 
 import csv
+import io
 import json
+import locale
 import random
+import warnings
 from pathlib import Path
 from typing import Protocol, TypedDict
 
@@ -46,6 +49,28 @@ class TokenizedExample(TypedDict):
     formatted_text: str
 
 
+def _read_dataset_text(path: Path) -> str:
+    """
+    Decode a dataset file as UTF-8, dropping a leading BOM (Excel writes one).
+
+    Reads used to rely on the platform default encoding, which is cp1252 on
+    most Windows machines and silently turned UTF-8 text such as "café" into
+    "cafÃ©". A file that is not valid UTF-8 still falls back to that platform
+    default, with a warning, so a file that loaded before still loads.
+    """
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        fallback = locale.getpreferredencoding(False)
+        warnings.warn(
+            f"{path.name} is not valid UTF-8, so it was decoded with the platform "
+            f"default encoding ({fallback}). Save it as UTF-8 if any characters look wrong.",
+            stacklevel=3,
+        )
+        return raw.decode(fallback)
+
+
 def load_raw_examples(config: DatasetConfig) -> list[Example]:
     """
     Load a CSV or JSONL file and map its configured columns to {prompt, response}.
@@ -56,16 +81,27 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
     deep inside training.
     """
     path = config.file_path
-    if path.suffix == ".jsonl":
-        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    elif path.suffix == ".csv":
-        with path.open(newline="") as f:
-            rows = list(csv.DictReader(f))
+    suffix = path.suffix.lower()  # Windows and Excel often save DATA.CSV
+    if suffix == ".jsonl":
+        rows = [json.loads(line) for line in _read_dataset_text(path).splitlines() if line.strip()]
+    elif suffix == ".csv":
+        # newline="" matches how the file used to be opened, which the csv
+        # module needs to keep line breaks inside quoted fields intact.
+        rows = list(csv.DictReader(io.StringIO(_read_dataset_text(path), newline="")))
     else:
         raise ValueError(f"Unsupported dataset format: '{path.suffix}'. Expected .csv or .jsonl")
 
     if not rows:
         raise ValueError(f"Dataset file {path} contains no rows")
+
+    # Rows are counted from 1 without the CSV header or blank lines, which is
+    # how a user scrolling the data in a spreadsheet or editor would count them.
+    for row_number, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"Row {row_number} of {path.name} is a JSON {type(row).__name__}, not an object. "
+                'A .jsonl file needs one object per line, like {"instruction": "...", "output": "..."}.'
+            )
 
     actual_columns = set(rows[0].keys())
     required = {config.prompt_column, config.response_column}
@@ -76,10 +112,53 @@ def load_raw_examples(config: DatasetConfig) -> list[Example]:
             f"Expected: {sorted(required)}. Found: {sorted(actual_columns)}"
         )
 
-    return [
+    # The check above only sees the first row. A later row without a key
+    # used to surface as a bare KeyError with no row number.
+    for row_number, row in enumerate(rows, start=1):
+        absent = sorted(required - set(row.keys()))
+        if absent:
+            raise ValueError(
+                f"Row {row_number} of {path.name} is missing required column(s) {absent}. "
+                f"Every row needs: {sorted(required)}."
+            )
+
+    examples = [
         Example(prompt=row[config.prompt_column], response=row[config.response_column])
         for row in rows
     ]
+    _warn_about_suspect_values(examples, path)
+    return examples
+
+
+def _warn_about_suspect_values(examples: list[Example], path: Path) -> None:
+    """
+    Warn, never raise, about values that are not non-empty text.
+
+    They reach the chat template unchanged. Phi-3's template joins content
+    with "+" and raises a TypeError on them; other templates may render a
+    Python repr such as "None" that the model would then learn. This only
+    warns because a dataset that trains today has to keep training.
+    """
+    non_text_rows, empty_rows = [], []
+    for row_number, example in enumerate(examples, start=1):
+        values = (example["prompt"], example["response"])
+        if not all(isinstance(value, str) for value in values):
+            non_text_rows.append(row_number)
+        elif not all(value.strip() for value in values):
+            empty_rows.append(row_number)
+    if non_text_rows:
+        warnings.warn(
+            f"{len(non_text_rows)} row(s) of {path.name} have a prompt or response that is "
+            f"not text (a number, list, object or null), e.g. rows {non_text_rows[:10]}. "
+            "They are passed to the chat template as they are.",
+            stacklevel=3,
+        )
+    if empty_rows:
+        warnings.warn(
+            f"{len(empty_rows)} row(s) of {path.name} have an empty prompt or response, "
+            f"e.g. rows {empty_rows[:10]}.",
+            stacklevel=3,
+        )
 
 
 def format_example(example: Example, tokenizer: TokenizerProtocol) -> str:
@@ -113,6 +192,20 @@ def split_train_val(
     return shuffled[val_size:], shuffled[:val_size]
 
 
+def held_out_examples(config: DatasetConfig, n: int) -> list[Example]:
+    """
+    The first n examples of the validation slice that build_dataset holds out.
+
+    Same split_train_val call and default seed as build_dataset, so these
+    rows were never trained on. The first n raw rows are not a substitute:
+    the split shuffles before holding a slice out, so they are mostly
+    training rows. scripts/colab_reevaluate_existing_adapter.py rebuilds its
+    evaluation set the same way.
+    """
+    _, val_raw = split_train_val(load_raw_examples(config), config.validation_split)
+    return val_raw[:n]
+
+
 def build_dataset(
     config: DatasetConfig, tokenizer: TokenizerProtocol
 ) -> tuple[list[TokenizedExample], list[TokenizedExample]]:
@@ -126,4 +219,23 @@ def build_dataset(
             for ex in examples
         ]
 
-    return process(train_raw), process(val_raw)
+    train, val = process(train_raw), process(val_raw)
+    _warn_about_truncation(train + val, config.max_sequence_length)
+    return train, val
+
+
+def _warn_about_truncation(tokenized: list[TokenizedExample], max_length: int) -> None:
+    """
+    Truncation is silent and keeps the start of the text. The response and
+    the end-of-sequence token come last, so a cut example loses those first
+    and never shows the model where its answer ends. This only warns, since
+    raising would stop datasets that train today.
+    """
+    filled = sum(1 for ex in tokenized if sum(ex["attention_mask"]) >= max_length)
+    if filled:
+        warnings.warn(
+            f"{filled} of {len(tokenized)} example(s) reached max_sequence_length={max_length} "
+            "tokens and were probably cut, which removes the end of the response and the "
+            "end-of-sequence token. Raise max_sequence_length or shorten those examples.",
+            stacklevel=3,
+        )

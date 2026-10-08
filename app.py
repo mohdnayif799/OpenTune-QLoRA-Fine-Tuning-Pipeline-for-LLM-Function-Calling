@@ -13,13 +13,16 @@ Colab tunnel or a rented GPU box) - see design doc Section 25.
 
 from __future__ import annotations
 
+import html
+import re
+import tempfile
 from pathlib import Path
 
 import streamlit as st
 
 from config import DatasetConfig, LoRAConfig, LoRAPreset, RunConfig, TrainingConfig
 from model_registry import MODEL_REGISTRY, get_model
-from data_pipeline import load_raw_examples
+from data_pipeline import held_out_examples
 from evaluate import evaluate_models
 from inference import LoadedModel, generate_response, load_finetuned_model
 from train import run_training
@@ -38,6 +41,79 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
+CHAT_CSS = """
+<style>
+.user-msg-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: 1.75rem 0 0.55rem 0;
+}
+.user-msg {
+    max-width: min(56%, 36rem);
+    background: rgba(59, 130, 246, 0.10);
+    border: 1px solid rgba(59, 130, 246, 0.20);
+    border-radius: 1.15rem 1.15rem 0.35rem 1.15rem;
+    padding: 0.7rem 1.05rem;
+    font-size: 0.95rem;
+    line-height: 1.55;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+    .user-msg { max-width: 86%; }
+}
+</style>
+"""
+
+
+def _render_user_message(text: str) -> None:
+    """
+    Draw a user turn as a right-aligned bubble with no avatar.
+
+    The text is HTML escaped instead of going through Markdown, so a question
+    containing *asterisks*, __init__.py, <b> or $ shows exactly as typed.
+    Newlines become <br> after escaping, because Markdown ends an HTML block
+    at the first blank line.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    safe = html.escape(normalized).replace("\n", "<br>")
+    st.markdown(
+        f'<div class="user-msg-row"><div class="user-msg">{safe}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_assistant_message(text: str) -> None:
+    """Draw a model turn as plain text in a bare container, which never draws an avatar."""
+    with st.container():
+        st.markdown(text)
+
+
+RUN_NAME_FILE_PART_MAX_CHARS = 60
+
+
+def _run_name_for(model_display_name: str, upload_name: str) -> str:
+    """
+    Name a run after the model and the uploaded file. train.py uses the run
+    name as the folder for checkpoints and logs, and runs that differed only
+    in their dataset used to share one folder.
+
+    RunConfig accepts any string here, so the cleaning follows that folder
+    use on Windows and Linux: each run of characters other than letters,
+    digits, ".", "(", ")" and "-" becomes "-", and trailing dots and dashes
+    (Windows drops trailing dots from folder names) are removed. Registry
+    display names come out exactly as the old replace(" ", "-") made them.
+    The file part is capped to keep checkpoint paths short.
+    """
+
+    def clean(text: str) -> str:
+        return re.sub(r"[^\w.()-]+", "-", text).strip(".-")
+
+    model_part = clean(model_display_name)
+    file_part = clean(Path(upload_name).stem)[:RUN_NAME_FILE_PART_MAX_CHARS].strip(".-")
+    return f"run-{model_part}-{file_part}" if file_part else f"run-{model_part}"
+
+
 tab_setup, tab_train, tab_eval, tab_chat = st.tabs(
     ["1. Setup", "2. Configure & Train", "3. Evaluate", "4. Chat"]
 )
@@ -53,9 +129,13 @@ with tab_setup:
     selected_model = MODEL_REGISTRY[selected_key]
 
     if selected_model.is_gated:
+        # The app has no token field: downloads authenticate through whatever
+        # login huggingface_hub already finds on the machine running the app.
         st.warning(
-            f"{selected_model.display_name} is gated. You'll need to accept its "
-            f"license on Hugging Face and provide an access token before training."
+            f"{selected_model.display_name} is gated. Accept its license on its "
+            f"Hugging Face page first. This app has no token field, so the machine "
+            f"running it must already be logged in: run `hf auth login` (or "
+            f"`huggingface_hub.login()` in Colab), or set the HF_TOKEN environment variable."
         )
     st.caption(
         f"~{selected_model.param_count_billions}B parameters · "
@@ -135,38 +215,48 @@ with tab_train:
         if not setup.get("uploaded_file"):
             st.error("Upload a dataset in the Setup tab first.")
         else:
-            dataset_path = Path("/tmp") / setup["uploaded_file"].name
+            # "/tmp" is not a temp folder on Windows, and the client controls
+            # the file name, so keep only its last path component.
+            dataset_path = Path(tempfile.gettempdir()) / Path(setup["uploaded_file"].name).name
             dataset_path.write_bytes(setup["uploaded_file"].getvalue())
 
             lora_kwargs = {"preset": LoRAPreset(preset_choice)}
             if preset_choice == LoRAPreset.CUSTOM.value:
                 lora_kwargs.update(r=custom_r, lora_alpha=custom_alpha)
 
-            run_config = RunConfig(
-                run_name=f"run-{selected_model.display_name}".replace(" ", "-"),
-                base_model_id=st.session_state["_setup"]["model_key"],
-                dataset=DatasetConfig(
-                    file_path=dataset_path,
-                    prompt_column=setup["prompt_column"],
-                    response_column=setup["response_column"],
-                ),
-                lora=LoRAConfig(**lora_kwargs),
-                training=TrainingConfig(
-                    num_train_epochs=epochs,
-                    per_device_train_batch_size=batch_size,
-                    learning_rate=learning_rate,
-                ),
-            )
-            st.session_state["run_config"] = run_config
-
-            with st.spinner("Fine-tuning in progress - this needs a GPU runtime..."):
-                result = run_training(
-                    run_config,
-                    checkpoints_dir=Path("checkpoints"),
-                    logs_dir=Path("logs"),
+            # pydantic's ValidationError is a ValueError. Catching only the
+            # config construction turns a bad field value (e.g. a learning rate
+            # of 0, which the number input allows) into a message, while errors
+            # from training itself still surface unchanged.
+            try:
+                run_config = RunConfig(
+                    run_name=_run_name_for(selected_model.display_name, setup["uploaded_file"].name),
+                    base_model_id=st.session_state["_setup"]["model_key"],
+                    dataset=DatasetConfig(
+                        file_path=dataset_path,
+                        prompt_column=setup["prompt_column"],
+                        response_column=setup["response_column"],
+                    ),
+                    lora=LoRAConfig(**lora_kwargs),
+                    training=TrainingConfig(
+                        num_train_epochs=epochs,
+                        per_device_train_batch_size=batch_size,
+                        learning_rate=learning_rate,
+                    ),
                 )
-            st.session_state["training_result"] = result
-            st.success(f"Training complete. Final loss: {result.final_train_loss:.4f}")
+            except ValueError as e:
+                st.error(f"Invalid run configuration, training was not started:\n\n{e}")
+            else:
+                st.session_state["run_config"] = run_config
+
+                with st.spinner("Fine-tuning in progress - this needs a GPU runtime..."):
+                    result = run_training(
+                        run_config,
+                        checkpoints_dir=Path("checkpoints"),
+                        logs_dir=Path("logs"),
+                    )
+                st.session_state["training_result"] = result
+                st.success(f"Training complete. Final loss: {result.final_train_loss:.4f}")
 
     if st.session_state["training_result"]:
         r = st.session_state["training_result"]
@@ -211,17 +301,20 @@ with tab_eval:
                 )
                 base_wrapped = LoadedModel(model=base_model_only, tokenizer=base_tokenizer, adapter_path="none")
 
-                # Real held-out examples from the dataset actually uploaded in
-                # the Setup tab, not generic placeholder prompts.
-                raw_examples = load_raw_examples(run_config.dataset)
-                sample = raw_examples[: min(3, len(raw_examples))]
+                # The first rows of the validation slice that training held out
+                # (same split and seed as build_dataset), so neither model was
+                # trained on them.
+                sample = held_out_examples(run_config.dataset, 3)
                 eval_examples = [
                     {"instruction": ex["prompt"], "reference": ex["response"]} for ex in sample
                 ]
 
+                # Greedy decoding with room for a full JSON call, as in
+                # scripts/colab_reevaluate_existing_adapter.py: sampling made two
+                # runs disagree, and 60 tokens could cut a function call short.
                 def generate_fn(instruction: str):
-                    base_out = generate_response(base_wrapped, instruction, max_new_tokens=60)
-                    finetuned_out = generate_response(finetuned_loaded, instruction, max_new_tokens=60)
+                    base_out = generate_response(base_wrapped, instruction, max_new_tokens=150, temperature=0)
+                    finetuned_out = generate_response(finetuned_loaded, instruction, max_new_tokens=150, temperature=0)
                     return base_out, finetuned_out
 
                 st.session_state["comparison_report"] = evaluate_models(
@@ -253,18 +346,32 @@ with tab_chat:
         if "chat_history" not in st.session_state:
             st.session_state["chat_history"] = []
 
-        for role, msg in st.session_state["chat_history"]:
-            with st.chat_message(role):
-                st.write(msg)
+        st.markdown(CHAT_CSS, unsafe_allow_html=True)
 
+        # st.chat_input inside a tab is drawn inline, not pinned to the bottom
+        # of the page. The history lives in a container created above the input
+        # so the new question and the spinner appear above the input box.
+        history_area = st.container()
         user_msg = st.chat_input("Ask the fine-tuned model something...")
+
+        with history_area:
+            for role, msg in st.session_state["chat_history"]:
+                if role == "user":
+                    _render_user_message(msg)
+                else:
+                    _render_assistant_message(msg)
+
         if user_msg:
             st.session_state["chat_history"].append(("user", user_msg))
-            if st.session_state["loaded_chat_model"] is None:
-                st.session_state["loaded_chat_model"] = load_finetuned_model(
-                    base_model_id=st.session_state["run_config"].base_model_id,
-                    adapter_path=Path(st.session_state["training_result"].adapter_path),
-                )
-            response = generate_response(st.session_state["loaded_chat_model"], user_msg)
+            with history_area:
+                _render_user_message(user_msg)  # show the question straight away
+                with st.container():
+                    with st.spinner("Generating..."):
+                        if st.session_state["loaded_chat_model"] is None:
+                            st.session_state["loaded_chat_model"] = load_finetuned_model(
+                                base_model_id=st.session_state["run_config"].base_model_id,
+                                adapter_path=Path(st.session_state["training_result"].adapter_path),
+                            )
+                        response = generate_response(st.session_state["loaded_chat_model"], user_msg)
             st.session_state["chat_history"].append(("assistant", response))
             st.rerun()
