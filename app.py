@@ -103,9 +103,13 @@ with tab_setup:
     selected_model = MODEL_REGISTRY[selected_key]
 
     if selected_model.is_gated:
+        # The app has no token field: downloads authenticate through whatever
+        # login huggingface_hub already finds on the machine running the app.
         st.warning(
-            f"{selected_model.display_name} is gated. You'll need to accept its "
-            f"license on Hugging Face and provide an access token before training."
+            f"{selected_model.display_name} is gated. Accept its license on its "
+            f"Hugging Face page first. This app has no token field, so the machine "
+            f"running it must already be logged in: run `hf auth login` (or "
+            f"`huggingface_hub.login()` in Colab), or set the HF_TOKEN environment variable."
         )
     st.caption(
         f"~{selected_model.param_count_billions}B parameters · "

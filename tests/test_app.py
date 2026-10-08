@@ -238,6 +238,15 @@ def test_invalid_run_config_shows_an_error_instead_of_a_traceback():
     print("PASS: a learning rate of 0 shows st.error naming the field and never starts training")
 
 
+def test_gated_warning_names_the_login_paths_that_exist():
+    at = _new_app_test()
+    at.run()
+    at.selectbox[0].select("Llama 3 8B Instruct (gated)").run()
+    warnings = [w.value for w in at.warning if "gated" in w.value.lower()]
+    assert any("HF_TOKEN" in w for w in warnings)
+    print("PASS: gated warning points at Hugging Face login or HF_TOKEN, since the app has no token field")
+
+
 if __name__ == "__main__":
     test_app_runs_without_error()
     test_model_dropdown_lists_all_registered_models()
@@ -253,4 +262,5 @@ if __name__ == "__main__":
     test_chat_submit_appends_one_turn_each_and_renders_answer()
     test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name()
     test_invalid_run_config_shows_an_error_instead_of_a_traceback()
+    test_gated_warning_names_the_login_paths_that_exist()
     print("\nAll app.py structural tests passed (UI wiring - NOT the GPU-bound flows).")
