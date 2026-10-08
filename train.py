@@ -166,6 +166,25 @@ def _find_last_complete_checkpoint(output_dir: Path) -> str | None:
     return None
 
 
+def _warn_if_no_cuda(run_config: RunConfig) -> None:
+    """
+    Without CUDA the failure otherwise comes from deep inside bitsandbytes or
+    from SFTConfig's bf16 check, neither of which names the real cause. This
+    only prints: whether a given setup can run is decided by those libraries,
+    not here.
+    """
+    if run_config.training.force_cpu:
+        return
+    import torch
+
+    if not torch.cuda.is_available():
+        print(
+            "WARNING: No CUDA device is visible and force_cpu is False. Loading the base "
+            "model in 4-bit (bitsandbytes) and bf16 training both expect an NVIDIA GPU, so "
+            "this run is likely to fail. On Colab, switch the runtime to a GPU."
+        )
+
+
 def run_training(
     run_config: RunConfig,
     checkpoints_dir: Path,
@@ -203,6 +222,7 @@ def run_training(
     # a wrong column name otherwise surfaces from build_dataset only after the
     # tokenizer download and the 4-bit model load, minutes into the run.
     load_raw_examples(run_config.dataset)
+    _warn_if_no_cuda(run_config)
 
     model_entry = get_model(run_config.base_model_id)
     output_dir = checkpoints_dir / run_config.run_name

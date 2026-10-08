@@ -307,6 +307,37 @@ def test_run_training_rejects_a_bad_column_before_loading_anything():
     shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _run_training_output(force_cpu: bool) -> str:
+    """Run the orchestration with fakes and no CUDA device, and return what it printed."""
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+
+    _FakeTrainer.calls = []
+    workdir = Path(tempfile.mkdtemp())
+    cfg = _make_run_config(run_name="cuda-check", training=TrainingConfig(force_cpu=force_cpu))
+    out = io.StringIO()
+    # build_training_arguments is patched because SFTConfig itself raises
+    # without bf16 support when force_cpu is False, which is the case here.
+    with patch("torch.cuda.is_available", return_value=False), \
+            patch("train.build_training_arguments", return_value=None), \
+            contextlib.redirect_stdout(out):
+        run_training(
+            cfg, checkpoints_dir=workdir / "checkpoints", logs_dir=workdir / "logs",
+            model_loader=_fake_model_loader, tokenizer_loader=_fake_tokenizer_loader,
+            trainer_cls=_FakeTrainer,
+        )
+    shutil.rmtree(workdir, ignore_errors=True)
+    return out.getvalue()
+
+
+def test_run_training_warns_when_no_cuda_and_not_forced_to_cpu():
+    assert "No CUDA device" in _run_training_output(force_cpu=False)
+    assert "No CUDA device" not in _run_training_output(force_cpu=True)
+    print("PASS: a missing CUDA device is reported up front unless force_cpu is set")
+
+
 if __name__ == "__main__":
     test_bnb_config_uses_run_configs_quantization_setting()
     test_lora_config_pulls_target_modules_from_registry_not_run_config()
@@ -318,4 +349,5 @@ if __name__ == "__main__":
     test_incomplete_newest_checkpoint_falls_back_to_last_complete_one()
     test_all_checkpoints_incomplete_falls_back_to_fresh_start()
     test_run_training_rejects_a_bad_column_before_loading_anything()
+    test_run_training_warns_when_no_cuda_and_not_forced_to_cpu()
     print("\nAll train.py tests passed (config + orchestration logic - NOT a real GPU training run).")
