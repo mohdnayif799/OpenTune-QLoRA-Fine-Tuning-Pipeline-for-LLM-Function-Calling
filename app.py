@@ -194,31 +194,39 @@ with tab_train:
             if preset_choice == LoRAPreset.CUSTOM.value:
                 lora_kwargs.update(r=custom_r, lora_alpha=custom_alpha)
 
-            run_config = RunConfig(
-                run_name=f"run-{selected_model.display_name}".replace(" ", "-"),
-                base_model_id=st.session_state["_setup"]["model_key"],
-                dataset=DatasetConfig(
-                    file_path=dataset_path,
-                    prompt_column=setup["prompt_column"],
-                    response_column=setup["response_column"],
-                ),
-                lora=LoRAConfig(**lora_kwargs),
-                training=TrainingConfig(
-                    num_train_epochs=epochs,
-                    per_device_train_batch_size=batch_size,
-                    learning_rate=learning_rate,
-                ),
-            )
-            st.session_state["run_config"] = run_config
-
-            with st.spinner("Fine-tuning in progress - this needs a GPU runtime..."):
-                result = run_training(
-                    run_config,
-                    checkpoints_dir=Path("checkpoints"),
-                    logs_dir=Path("logs"),
+            # pydantic's ValidationError is a ValueError. Catching only the
+            # config construction turns a bad field value (e.g. a learning rate
+            # of 0, which the number input allows) into a message, while errors
+            # from training itself still surface unchanged.
+            try:
+                run_config = RunConfig(
+                    run_name=f"run-{selected_model.display_name}".replace(" ", "-"),
+                    base_model_id=st.session_state["_setup"]["model_key"],
+                    dataset=DatasetConfig(
+                        file_path=dataset_path,
+                        prompt_column=setup["prompt_column"],
+                        response_column=setup["response_column"],
+                    ),
+                    lora=LoRAConfig(**lora_kwargs),
+                    training=TrainingConfig(
+                        num_train_epochs=epochs,
+                        per_device_train_batch_size=batch_size,
+                        learning_rate=learning_rate,
+                    ),
                 )
-            st.session_state["training_result"] = result
-            st.success(f"Training complete. Final loss: {result.final_train_loss:.4f}")
+            except ValueError as e:
+                st.error(f"Invalid run configuration, training was not started:\n\n{e}")
+            else:
+                st.session_state["run_config"] = run_config
+
+                with st.spinner("Fine-tuning in progress - this needs a GPU runtime..."):
+                    result = run_training(
+                        run_config,
+                        checkpoints_dir=Path("checkpoints"),
+                        logs_dir=Path("logs"),
+                    )
+                st.session_state["training_result"] = result
+                st.success(f"Training complete. Final loss: {result.final_train_loss:.4f}")
 
     if st.session_state["training_result"]:
         r = st.session_state["training_result"]

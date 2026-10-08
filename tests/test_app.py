@@ -223,6 +223,21 @@ def test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name():
     print("PASS: upload is saved under tempfile.gettempdir() using only the file's base name")
 
 
+def test_invalid_run_config_shows_an_error_instead_of_a_traceback():
+    import tempfile
+
+    at, received = _start_fine_tuning_with_fake_training("lr_zero_probe.jsonl", learning_rate=0.0)
+    try:
+        assert not at.exception, f"invalid config surfaced as a raw exception: {at.exception}"
+        assert received == [], "run_training must not be called with an invalid configuration"
+        assert any("learning_rate" in e.value for e in at.error)
+        # The tabs after Train must still render in the same run.
+        assert [t.label for t in at.tabs][-1] == "4. Chat"
+    finally:
+        (Path(tempfile.gettempdir()) / "lr_zero_probe.jsonl").unlink(missing_ok=True)
+    print("PASS: a learning rate of 0 shows st.error naming the field and never starts training")
+
+
 if __name__ == "__main__":
     test_app_runs_without_error()
     test_model_dropdown_lists_all_registered_models()
@@ -237,4 +252,5 @@ if __name__ == "__main__":
     test_chat_assistant_turn_renders_as_plain_markdown()
     test_chat_submit_appends_one_turn_each_and_renders_answer()
     test_uploaded_dataset_is_written_to_the_system_temp_dir_by_base_name()
+    test_invalid_run_config_shows_an_error_instead_of_a_traceback()
     print("\nAll app.py structural tests passed (UI wiring - NOT the GPU-bound flows).")
