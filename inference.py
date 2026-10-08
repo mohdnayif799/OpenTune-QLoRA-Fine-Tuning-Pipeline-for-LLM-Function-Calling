@@ -68,6 +68,10 @@ def load_finetuned_model(
     # base model in full precision here (the original bug) is a real
     # train/inference mismatch, not just slower: it was loading the model
     # without going through the same module wrapping training assumed.
+    # It matches only for the default quantization: build_bnb_config takes
+    # bnb_4bit_quant_type from the run's LoRAConfig (nf4 or fp4), while this
+    # loader has no run config and always uses nf4, so an adapter trained
+    # with fp4 is attached to an nf4 base here.
     from transformers import BitsAndBytesConfig
 
     bnb_config = BitsAndBytesConfig(
