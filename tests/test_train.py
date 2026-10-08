@@ -338,6 +338,48 @@ def test_run_training_warns_when_no_cuda_and_not_forced_to_cpu():
     print("PASS: a missing CUDA device is reported up front unless force_cpu is set")
 
 
+class _CheckpointingFakeTrainer(_FakeTrainer):
+    """Leaves a complete final checkpoint behind, as the real Trainer does at the last step."""
+
+    def __init__(self, model, args, train_dataset, eval_dataset, peft_config):
+        super().__init__(model, args, train_dataset, eval_dataset, peft_config)
+        self.output_dir = Path(args.output_dir)
+
+    def train(self, resume_from_checkpoint=None):
+        checkpoint = self.output_dir / "checkpoint-50"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        (checkpoint / "trainer_state.json").write_text("{}")
+        return super().train(resume_from_checkpoint)
+
+
+def test_same_run_name_with_a_different_dataset_refuses_to_resume():
+    import tempfile
+
+    workdir = Path(tempfile.mkdtemp())
+    first, second = workdir / "first.jsonl", workdir / "second.jsonl"
+    first.write_text('{"instruction": "a", "output": "b"}\n' * 5)
+    second.write_text('{"instruction": "c", "output": "d"}\n' * 5)
+
+    def run(path):
+        cfg = RunConfig(run_name="same-name", base_model_id="phi-3-mini",
+                        dataset=DatasetConfig(file_path=path), training=TrainingConfig(force_cpu=True))
+        return run_training(cfg, checkpoints_dir=workdir / "checkpoints", logs_dir=workdir / "logs",
+                            model_loader=_fake_model_loader, tokenizer_loader=_fake_tokenizer_loader,
+                            trainer_cls=_CheckpointingFakeTrainer)
+
+    _FakeTrainer.calls = []
+    run(first)
+    run(first)  # same data again: resuming is correct
+    assert any(c.startswith("train:resume=") and "checkpoint-50" in c for c in _FakeTrainer.calls)
+    try:
+        run(second)
+        raise AssertionError("expected ValueError, none raised")
+    except ValueError as e:
+        assert "different dataset" in str(e)
+    print("PASS: a second run under the same run_name with different data refuses to resume")
+    shutil.rmtree(workdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_bnb_config_uses_run_configs_quantization_setting()
     test_lora_config_pulls_target_modules_from_registry_not_run_config()
@@ -350,4 +392,5 @@ if __name__ == "__main__":
     test_all_checkpoints_incomplete_falls_back_to_fresh_start()
     test_run_training_rejects_a_bad_column_before_loading_anything()
     test_run_training_warns_when_no_cuda_and_not_forced_to_cpu()
+    test_same_run_name_with_a_different_dataset_refuses_to_resume()
     print("\nAll train.py tests passed (config + orchestration logic - NOT a real GPU training run).")
