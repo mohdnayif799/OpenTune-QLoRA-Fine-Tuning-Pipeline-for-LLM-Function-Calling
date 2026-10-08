@@ -62,8 +62,10 @@ class LoRAConfig(BaseModel):
     lora_dropout: float = Field(default=0.05, ge=0.0, lt=1.0)
     target_modules: list[str] = Field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"],
-        description="Attention projection layers to adapt; model-family specific "
-        "(see model_registry.py, which supplies the correct value per model).",
+        description="Not read by training: train.build_lora_config always takes "
+        "target_modules from the model's model_registry.py entry, because the "
+        "names are architecture specific. Setting this field has no effect; it "
+        "stays so logged run configs keep the same shape.",
     )
     quantization: QuantizationType = QuantizationType.NF4
     gradient_checkpointing: bool = True
@@ -103,8 +105,10 @@ class TrainingConfig(BaseModel):
     checkpoint_every_n_steps: int = Field(default=50, gt=0)
     early_stopping_patience: Optional[int] = Field(
         default=3,
-        description="Stop if validation loss doesn't improve for N eval "
-        "checks in a row. None disables early stopping.",
+        description="Intended: stop if validation loss doesn't improve for N "
+        "eval checks in a row. Not wired in yet, so it has no effect: "
+        "train.py attaches no early stopping callback, and the SFTConfig it "
+        "builds never evaluates (eval_strategy stays 'no').",
     )
     seed: int = 42
     force_cpu: bool = Field(
@@ -112,7 +116,10 @@ class TrainingConfig(BaseModel):
         description="Explicitly train on CPU instead of GPU. Per design doc "
         "Section 25, execution environment is selected via this config flag, "
         "not runtime auto-detection - SFTConfig validates bf16/GPU support at "
-        "construction time and fails ungracefully without this being explicit.",
+        "construction time and fails ungracefully without this being explicit. "
+        "It only sets use_cpu=True and bf16=False on the SFTConfig: run_training "
+        "still loads the base model in 4-bit through bitsandbytes with "
+        "device_map='auto', and a full CPU training run has not been verified.",
     )
 
 

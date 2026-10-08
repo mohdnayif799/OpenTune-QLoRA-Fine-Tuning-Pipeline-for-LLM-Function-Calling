@@ -36,9 +36,11 @@ class TrainingResult:
     run_name: str
     adapter_path: str
     final_train_loss: float
+    # Always None today: build_training_arguments sets no eval strategy or
+    # metric_for_best_model, so the trainer never records a best_metric.
     final_eval_loss: float | None
     num_steps_completed: int
-    stopped_early: bool
+    stopped_early: bool  # always False: no early stopping callback is attached
 
 
 def _to_hf_dataset(tokenized_examples: list) -> "Dataset":
@@ -271,7 +273,7 @@ def run_training(
         final_train_loss=train_result.training_loss,
         final_eval_loss=getattr(trainer.state, "best_metric", None),
         num_steps_completed=trainer.state.global_step,
-        stopped_early=False,  # updated once early-stopping callback is wired in
+        stopped_early=False,  # no early stopping callback; see TrainingConfig.early_stopping_patience
     )
     save_run_log(run_config, result, logs_dir)
     return result
