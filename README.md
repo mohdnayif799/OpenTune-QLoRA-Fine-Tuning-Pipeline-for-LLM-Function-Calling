@@ -53,25 +53,8 @@ Two design decisions separate this from a one-off fine-tuning script:
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    U([User]) --> UI[OpenTune Streamlit App]
-    UI --> CFG[Typed RunConfig, Pydantic v2]
-    CFG --> REG[(Model Registry<br/>5 architectures)]
-    CFG --> DS[(Training Dataset<br/>CSV or JSONL)]
-    BASE[Base LLM, 4-bit NF4 quantized]
-    REG --> FT[QLoRA Fine-Tuning<br/>train.py]
-    DS --> FT
-    BASE --> FT
-    FT --> ADAPTER[(Trained LoRA Adapter)]
-    BASE --> EVAL[Evaluation Harness<br/>evaluate.py]
-    ADAPTER --> EVAL
-    BASE --> CHAT[Inference and Chat<br/>inference.py]
-    ADAPTER --> CHAT
-    EVAL --> UI
-    CHAT --> UI
-    UI --> U
-```
+<p align="center"><img src="assets/diagrams/opentune_architecture.png" alt="OpenTune architecture" width="880"></p>
+*OpenTune architecture: the Streamlit app builds a typed run config, trains a QLoRA adapter on the chosen base model and dataset, then evaluates it and chats with it.*
 
 The Streamlit app (`app.py`) walks through four tabs in order — **Setup** (pick a registered base model, upload a dataset or load an already-trained adapter), **Configure & Train** (LoRA preset and training hyperparameters), **Evaluate** (base vs. fine-tuned comparison), and **Chat** (free-form inference) — and is UI wiring only: every tab calls into the modules below it rather than reimplementing logic. Real training, evaluation, and generation calls need a GPU-backed runtime (a Colab tunnel or a rented GPU box); the config, data-pipeline, and metric layers do not.
 
@@ -81,22 +64,8 @@ The adapter is deliberately **not merged** into the base weights. Inference reco
 
 The base model is loaded in 4-bit and frozen; only low-rank adapters on the attention and MLP projections are trained. This fits a full fine-tuning run on a single free-tier Colab GPU.
 
-```mermaid
-flowchart LR
-    A[(Salesforce xLAM Dataset)] --> B[Reformat to instruction<br/>and output JSONL]
-    B --> C[Seeded Shuffle and Split<br/>seed 42, 1200 examples]
-    C --> D[Train Split<br/>1080 examples]
-    C --> E[(Held-out Split<br/>120 examples, untouched)]
-    D --> F[Chat-Template Formatting<br/>and Tokenization]
-    BASE[Phi-3 Mini 3.8B] --> Q[4-bit NF4 Quantization<br/>bitsandbytes, double quant]
-    Q --> L[LoRA Adapter Injection<br/>r16, alpha32]
-    F --> T[SFTTrainer<br/>1 epoch, batch size 2, lr 2e-4]
-    L --> T
-    T --> CKPT[Checkpoint every 50 steps]
-    CKPT -->|resume on disconnect| T
-    T --> OUT[(Saved LoRA Adapter<br/>about 100 MB)]
-    T --> LOG[[run_log.json]]
-```
+<p align="center"><img src="assets/diagrams/opentune_qlora.png" alt="QLoRA fine-tuning pipeline" width="880"></p>
+*QLoRA pipeline: the xLAM data is reformatted and split with a seeded shuffle into 1080 training and 120 held out examples, then used to train a LoRA adapter on a 4-bit Phi-3 Mini, with a checkpoint every 50 steps.*
 
 **Dataset.** [Salesforce/xlam-function-calling-60k](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k) — 60,000 function-calling examples generated and verified through Salesforce's APIGen pipeline. Each row provides a natural-language `query`, the `tools` available for that query, and the reference `answers` as structured calls. The dataset is gated on Hugging Face; access must be requested once before use.
 
@@ -172,17 +141,11 @@ Implementation details that make these numbers trustworthy:
 
 Screenshots of the Chat tab (`app.py`), running the trained adapter against live generation — the same interface the app exposes when tunneled out of a Colab GPU runtime with `colab_app_walkthrough.py`. These are ad hoc, qualitative examples typed directly into the running app, separate from the deterministic 120-example benchmark above.
 
-### Function calling alongside ordinary conversation
+<p align="center"><img src="assets/screenshots_new/chat_1.png" alt="Chat tab: a single tool call and two tool calls in one reply" width="880"></p>
+*Chat tab with the trained adapter: a single tool call (get_weather for Hyderabad), then two tool calls in one reply (get_weather for Mumbai and get_stock_price for TCS).*
 
-![Chat tab: a function-calling request, an arithmetic question, and a general-knowledge question](assets/screenshots/chat-function-calling.png)
-
-A retail order request ("apples, bananas, and oranges, large size, at Whole Foods in New York City") is converted into a single, well-formed `get_order_confirmation` call with all three items and the size captured as arguments. The next two turns — plain arithmetic and a request to explain TCP — are answered directly in natural language with no tool call emitted, showing that fine-tuning for structured output did not come at the cost of the base model's general instruction-following.
-
-### Compound requests spanning multiple tools
-
-![Chat tab: one request that requires three different tools, answered as three tool calls](assets/screenshots/chat-multi-tool-call.png)
-
-A single turn asking for three unrelated things — Apple's earnings data, a Microsoft options quote for a specific expiration date, and the Hyderabad weather — is decomposed into three separate, correctly-argumented calls (`earning_data`, `option_data`, `weather`) returned together as one JSON array, with no arguments conflated across calls.
+<p align="center"><img src="assets/screenshots_new/chat_2.png" alt="Chat tab: set_alarm chosen from three available tools" width="880"></p>
+*The same Chat tab: a wake up request where the model picks set_alarm out of three offered tools (send_email, set_alarm, get_weather) and fills the time argument correctly.*
 
 ## Engineering Deep Dive
 
@@ -228,7 +191,7 @@ opentune-project/
 │   ├── adapter_config.json               # r=16, alpha=32, Phi-3 fused target modules
 │   └── adapter_model.safetensors         # Trained LoRA weights (~100 MB)
 ├── assets/
-│   └── screenshots/                      # README screenshots (see Execution Screenshots)
+│   └── screenshots/                      # Old Chat screenshots; README images are in assets/diagrams/ and assets/screenshots_new/
 └── tests/
     ├── requirements.txt                  # Test-environment dependencies
     ├── fixtures/                         # Shared fixtures for pipeline/training tests
